@@ -1,0 +1,120 @@
+name: Video Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL video (YouTube, Bilibili, TikTok, Douyin, ...)'
+        required: true
+        type: string
+      format:
+        description: 'Format selector của yt-dlp'
+        required: false
+        default: 'bestvideo+bestaudio/best'
+        type: string
+      audio_only:
+        description: 'Chỉ tải audio?'
+        required: false
+        default: false
+        type: boolean
+      audio_format:
+        description: 'Định dạng audio (nếu audio_only = true)'
+        required: false
+        default: 'mp3'
+        type: string
+      use_cookies:
+        description: 'Dùng cookie từ secret COOKIES_TXT? (bắt buộc cho Bilibili 1080P+ / YouTube 403)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -n 1
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare cookies file (if enabled)
+        if: ${{ inputs.use_cookies }}
+        env:
+          COOKIES_TXT: ${{ secrets.COOKIES_TXT }}
+        run: |
+          if [ -z "$COOKIES_TXT" ]; then
+            echo "::error::Secret COOKIES_TXT chưa được cấu hình trong repo."
+            exit 1
+          fi
+          printf '%s\n' "$COOKIES_TXT" > cookies.txt
+          echo "Cookies file created ($(wc -l < cookies.txt) lines)."
+
+      - name: Run downloader
+        env:
+          INPUT_URL: ${{ inputs.url }}
+          INPUT_FORMAT: ${{ inputs.format }}
+          INPUT_AUDIO_ONLY: ${{ inputs.audio_only }}
+          INPUT_AUDIO_FORMAT: ${{ inputs.audio_format }}
+          USE_COOKIES: ${{ inputs.use_cookies }}
+        run: |
+          ARGS=()
+          ARGS+=("-o" "downloads")
+          ARGS+=("-f" "$INPUT_FORMAT")
+
+          if [ "$INPUT_AUDIO_ONLY" = "true" ]; then
+            ARGS+=("--audio-only" "--audio-format" "$INPUT_AUDIO_FORMAT")
+          fi
+
+          if [ "$USE_COOKIES" = "true" ]; then
+            ARGS+=("--cookies-file" "cookies.txt")
+          fi
+
+          # Tách nhiều URL bằng dấu phẩy (nếu có)
+          IFS=',' read -ra URLS <<< "$INPUT_URL"
+          for u in "${URLS[@]}"; do
+            ARGS+=("$(echo -e "${u}" | xargs)")
+          done
+
+          echo "Running: python downloader.py ${ARGS[*]}"
+          python downloader.py "${ARGS[@]}"
+
+      - name: List downloaded files
+        if: always()
+        run: |
+          echo "=== Downloaded files ==="
+          if [ -d downloads ]; then
+            ls -lah downloads || true
+            du -sh downloads || true
+          else
+            echo "No downloads directory found."
+          fi
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-${{ github.run_number }}
+          path: downloads/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Cleanup cookies
+        if: always()
+        run: rm -f cookies.txt
