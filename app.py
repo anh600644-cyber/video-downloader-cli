@@ -3,12 +3,19 @@ import yt_dlp
 import os
 import tempfile
 import re
-import asyncio
-from f2.apps.douyin.handler import DouyinHandler
+import requests
+import time
 
-st.set_page_config(page_title="Video Downloader", page_icon="📥", layout="centered")
-st.title("📥 Đa Nền Tảng Video Downloader")
+st.set_page_config(page_title="Video Downloader Pro", page_icon="📥", layout="centered")
+st.title("📥 Video Downloader Pro")
+st.markdown("Hệ thống tự động định tuyến: **Siêu tốc cho Douyin/TikTok**, **Mạnh mẽ cho YouTube/Bilibili**.")
 
+# --- CẤU HÌNH MEDIA-PARSER ---
+# Nếu bạn tự host Media-Parser, hãy điền link vào đây (VD: http://localhost:8051/api/v1/parse)
+# Nếu để trống, code sẽ tự động dùng phương án dự phòng yt-dlp.
+MEDIA_PARSER_API_URL = os.getenv("MEDIA_PARSER_API_URL", "")
+
+# --- CÁC HÀM XỬ LÝ ---
 def extract_and_normalize_url(text):
     urls = re.findall(r'(https?://[^\s]+)', text)
     if not urls: return text.strip()
@@ -18,36 +25,63 @@ def extract_and_normalize_url(text):
         if match: return f"https://www.douyin.com/video/{match.group(1)}"
     return url
 
-async def download_douyin_with_f2(url, tmpdir):
-    """Sử dụng thư viện f2 để tải video Douyin."""
-    # f2 yêu cầu aweme_id hoặc link video
-    handler = DouyinHandler(kwargs={}) 
-    
-    try:
-        # Lấy thông tin video
-        video_info = await handler.fetch_one_video(url)
-        
-        # Lấy link tải không watermark chất lượng cao nhất
-        # Cấu trúc của f2 có thể thay đổi, nhưng thường là video.play_addr.url_list
-        video_url = video_info.video.play_addr.url_list[0]
-        title = re.sub(r'[\\/*?:"<>|]', "", video_info.desc)[:50]
-        
-        file_path = os.path.join(tmpdir, f"{title}.mp4")
-        
-        # Tải file bằng requests (f2 có thể cung cấp hàm tải, nhưng dùng requests cho đơn giản)
-        import requests
-        with requests.get(video_url, stream=True) as r:
-            r.raise_for_status()
-            with open(file_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
-                
-        return file_path, f"{title}.mp4"
-    except Exception as e:
-        raise Exception(f"Lỗi khi dùng f2: {e}")
+def download_file(url, filepath):
+    """Tải file từ link trực tiếp với thanh tiến trình."""
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        total_length = int(r.headers.get('content-length', 0))
+        with open(filepath, 'wb') as f:
+            if total_length == 0:
+                f.write(r.content)
+            else:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+    return filepath
 
-# --- Giao diện ---
+def parse_with_media_parser(url):
+    """Gọi API Media-Parser (nếu có cấu hình)."""
+    if not MEDIA_PARSER_API_URL:
+        return None
+        
+    try:
+        response = requests.get(MEDIA_PARSER_API_URL, params={"url": url}, timeout=15)
+        data = response.json()
+        if data.get("retcode") == 200 and data.get("succ"):
+            return data["data"]
+    except Exception as e:
+        st.warning(f"⚠️ Media-Parser không phản hồi ({e}). Chuyển sang dự phòng...")
+    return None
+
+def process_with_ytdlp(url, tmpdir, audio_only, cookie_path=None):
+    """Xử lý tải bằng yt-dlp (Dự phòng)."""
+    ydl_opts = {
+        'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
+        'quiet': True, 
+        'no_warnings': True,
+        'extractor_args': {'youtube': {'player_client': ['mweb', 'tv', 'android']}}
+    }
+    
+    if cookie_path:
+        ydl_opts['cookiefile'] = cookie_path
+
+    if audio_only:
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+    else:
+        ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        filename = ydl.prepare_filename(info)
+        if audio_only:
+            filename = os.path.splitext(filename)[0] + '.mp3'
+        return filename
+
+# --- GIAO DIỆN ---
 raw_input = st.text_area("🔗 Nhập URL (hoặc dán cả đoạn văn bản chia sẻ):", height=100)
 loai_tai = st.radio("Chọn định dạng tải:", ["Video (MP4)", "Chỉ Audio (MP3)"])
+audio_only = (loai_tai == "Chỉ Audio (MP3)")
+
 st.markdown("---")
 uploaded_cookie = st.file_uploader("Tải lên file cookies.txt (Dự phòng cho YouTube/Bilibili)", type=["txt"])
 
@@ -58,41 +92,61 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
         final_url = extract_and_normalize_url(raw_input)
         st.info(f"🔗 Đã nhận diện: {final_url}")
         
-        with st.spinner("⏳ Đang xử lý..."):
+        with st.spinner("⏳ Hệ thống đang phân tích và tải video..."):
             try:
                 with tempfile.TemporaryDirectory() as tmpdir:
-                    # 1. Xử lý Douyin/TikTok bằng f2
+                    file_data = None
+                    filename = "video.mp4"
+                    mime_type = "video/mp4" if not audio_only else "audio/mp3"
+
+                    # BƯỚC 1: THỬ DÙNG MEDIA-PARSER (Nếu được cấu hình và là link Douyin/TikTok)
+                    mp_data = None
                     if "douyin.com" in final_url or "tiktok.com" in final_url:
-                        st.info("⚡ Đang dùng thư viện f2 để tải Douyin/TikTok...")
-                        file_path, filename = asyncio.run(download_douyin_with_f2(final_url, tmpdir))
-                        with open(file_path, "rb") as f: file_data = f.read()
-                        st.download_button("💾 Lưu Video", file_data, file_name=filename, mime="video/mp4")
+                        if MEDIA_PARSER_API_URL:
+                            st.info("⚡ Đang dùng Media-Parser (Tốc độ cao)...")
+                            mp_data = parse_with_media_parser(final_url)
                     
-                    # 2. Xử lý YouTube, Bilibili, v.v. bằng yt-dlp
-                    else:
-                        st.info("⚙️ Đang dùng yt-dlp xử lý...")
-                        ydl_opts = {
-                            'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
-                            'quiet': True, 'no_warnings': True,
-                            'extractor_args': {'youtube': {'player_client': ['mweb', 'tv', 'android']}}
-                        }
+                    if mp_data:
+                        # Nếu Media-Parser thành công
+                        download_url = mp_data.get("audio_url") if audio_only else mp_data.get("video_url")
+                        title = re.sub(r'[\\/*?:"<>|]', "", mp_data.get("title", "video"))[:50]
+                        
+                        if download_url:
+                            ext = ".mp3" if audio_only else ".mp4"
+                            filename = title + ext
+                            filepath = os.path.join(tmpdir, filename)
+                            st.info("📥 Đang tải file từ link trực tiếp...")
+                            download_file(download_url, filepath)
+                            
+                            with open(filepath, "rb") as f:
+                                file_data = f.read()
+                            st.success("✅ Tải thành công qua Media-Parser!")
+                    
+                    # BƯỚC 2: DỰ PHÒNG BẰNG YT-DLP
+                    if file_data is None:
+                        st.info("⚙️ Đang dùng hệ thống dự phòng (yt-dlp)...")
+                        
+                        cookie_path = None
                         if uploaded_cookie is not None:
                             cookie_path = os.path.join(tmpdir, "cookies.txt")
                             with open(cookie_path, "wb") as f: f.write(uploaded_cookie.getbuffer())
-                            ydl_opts['cookiefile'] = cookie_path
+                            st.info("🍪 Đã nạp cookies.txt")
 
-                        if loai_tai == "Video (MP4)":
-                            ydl_opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-                        else:
-                            ydl_opts['format'] = 'bestaudio/best'
-                            ydl_opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+                        filepath = process_with_ytdlp(final_url, tmpdir, audio_only, cookie_path)
+                        filename = os.path.basename(filepath)
+                        with open(filepath, "rb") as f:
+                            file_data = f.read()
+                        st.success("✅ Tải thành công qua yt-dlp!")
 
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            info = ydl.extract_info(final_url, download=True)
-                            filename = ydl.prepare_filename(info)
-                            if loai_tai == "Chỉ Audio (MP3)": filename = os.path.splitext(filename)[0] + '.mp3'
-                            with open(filename, "rb") as f: file_data = f.read()
-                            st.download_button("💾 Lưu File", file_data, file_name=os.path.basename(filename))
+                    # HIỂN THỊ NÚT TẢI XUỐNG
+                    if file_data:
+                        st.download_button(
+                            label="💾 Lưu File Về Máy",
+                            data=file_data,
+                            file_name=filename,
+                            mime=mime_type
+                        )
+                        
             except Exception as e:
                 st.error(f"❌ Lỗi: {e}")
-                st.info("Mẹo: Nếu vẫn lỗi, hãy thử dùng link rút gọn v.douyin.com hoặc kiểm tra lại file cookies.txt.")
+                st.info("Mẹo: Nếu là YouTube, hãy thử tải file cookies.txt lên. Nếu là Douyin, link có thể đã bị xóa hoặc cần đăng nhập.")
