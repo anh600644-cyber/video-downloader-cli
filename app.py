@@ -9,16 +9,24 @@ st.set_page_config(page_title="Video Downloader Pro", page_icon="📥", layout="
 st.title("📥 Video Downloader Pro")
 st.markdown("Hỗ trợ **YouTube, Bilibili, TikTok, Douyin** với kiến trúc định tuyến thông minh.")
 
-def extract_url(text):
+# ĐÃ SỬA: Hàm trích xuất và CHUẨN HÓA link
+def extract_and_normalize_url(text):
     urls = re.findall(r'(https?://[^\s]+)', text)
-    return urls[0].strip('.,;()[]"\'') if urls else text.strip()
+    if not urls: return text.strip()
+    url = urls[0].strip('.,;()[]"\'')
+    
+    # Chuyển link modal_id thành link video chuẩn cho Douyin
+    if "douyin.com" in url and "modal_id=" in url:
+        match = re.search(r'modal_id=(\d+)', url)
+        if match: 
+            return f"https://www.douyin.com/video/{match.group(1)}"
+    return url
 
 def get_douyin_video_id(url):
     match = re.search(r'(?:modal_id=|/video/)(\d+)', url)
     return match.group(1) if match else None
 
 def download_douyin_via_aweme(video_id, tmpdir):
-    # Thêm User-Agent giả lập điện thoại để API trả về file thật
     headers = {
         'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1',
         'Referer': 'https://www.douyin.com/'
@@ -30,7 +38,6 @@ def download_douyin_via_aweme(video_id, tmpdir):
         response = requests.get(api_url, headers=headers, allow_redirects=True, timeout=15)
         response.raise_for_status()
         
-        # KIỂM TRA DUNG LƯỢNG FILE (Nếu < 100KB thì chắc chắn là file lỗi/HTML)
         if len(response.content) < 100000:
             raise Exception("File tải về quá nhỏ hoặc bị chặn (0 KB).")
             
@@ -55,8 +62,9 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
     if not raw_input:
         st.warning("Vui lòng nhập link video!")
     else:
-        final_url = extract_url(raw_input)
-        st.info(f"🔗 Đã nhận diện: {final_url}")
+        # ĐÃ SỬA: Dùng hàm chuẩn hóa link
+        final_url = extract_and_normalize_url(raw_input)
+        st.info(f"🔗 Đã nhận diện và chuẩn hóa: {final_url}")
         
         with st.spinner("⏳ Đang xử lý..."):
             try:
@@ -64,7 +72,7 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                     file_data = None
                     filename = "video.mp4"
                     
-                    # BƯỚC 1: THỬ API AWEME
+                    # BƯỚC 1: THỬ API AWEME (Dùng link đã chuẩn hóa)
                     if "douyin.com" in final_url or "tiktok.com" in final_url:
                         video_id = get_douyin_video_id(final_url)
                         if video_id:
@@ -72,7 +80,7 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                             if filepath:
                                 with open(filepath, "rb") as f: file_data = f.read()
                     
-                    # BƯỚC 2: FALLBACK SANG YT-DLP (NẾU API LỖI)
+                    # BƯỚC 2: FALLBACK SANG YT-DLP (Dùng link đã chuẩn hóa)
                     if file_data is None:
                         st.info("⚙️ Đang dùng yt-dlp (với Cookie) để tải...")
                         ydl_opts = {
@@ -107,4 +115,4 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                         
             except Exception as e:
                 st.error(f"❌ Lỗi: {e}")
-                st.info("Mẹo: Hãy chắc chắn bạn đã tải file cookies.txt lên và thử lại.")
+                st.info("Mẹo: Nếu lỗi 'Fresh cookies needed', hãy chắc chắn file cookies.txt bạn tải lên là mới nhất và được xuất từ trình duyệt đang đăng nhập Douyin.")
