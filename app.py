@@ -4,6 +4,7 @@ import os
 import tempfile
 import re
 import asyncio
+import requests
 from f2.apps.douyin.handler import DouyinHandler
 
 st.set_page_config(page_title="Video Downloader Pro", page_icon="📥", layout="centered")
@@ -15,41 +16,51 @@ def extract_and_normalize_url(text):
     urls = re.findall(r'(https?://[^\s]+)', text)
     if not urls: return text.strip()
     url = urls[0].strip('.,;()[]"\'')
-    
-    # Chuyển link modal_id thành link video chuẩn cho Douyin
     if "douyin.com" in url and "modal_id=" in url:
         match = re.search(r'modal_id=(\d+)', url)
-        if match: 
-            return f"https://www.douyin.com/video/{match.group(1)}"
+        if match: return f"https://www.douyin.com/video/{match.group(1)}"
     return url
 
 def get_douyin_video_id(url):
     match = re.search(r'(?:modal_id=|/video/)(\d+)', url)
     return match.group(1) if match else None
 
+# --- HÀM MỚI: Chuyển đổi file cookies.txt (Netscape) thành chuỗi cookie ---
+def parse_netscape_cookie(cookie_text):
+    cookies = []
+    for line in cookie_text.splitlines():
+        line = line.strip()
+        # Bỏ qua dòng trống và dòng comment
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 7:
+            name = parts[5]
+            value = parts[6]
+            cookies.append(f"{name}={value}")
+    return "; ".join(cookies)
+
 # Hàm tải video Douyin bằng f2
-async def download_douyin_with_f2(aweme_id, tmpdir, cookie_content=None):
+async def download_douyin_with_f2(aweme_id, tmpdir, cookie_string=None):
     st.info("⚡ Đang dùng thư viện f2 chuyên dụng để xử lý Douyin...")
     
-    # Cấu hình cho f2 (có thể cần User-Agent và Referer)
     kwargs = {
         "headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
             "Referer": "https://www.douyin.com/",
         },
+        "proxies": {"http://": None, "https://": None},
     }
     
-    # Nếu có cookie được tải lên, thêm vào cấu hình
-    if cookie_content:
-        kwargs["cookie"] = cookie_content
+    # Gán chuỗi cookie đã được làm sạch vào cấu hình
+    if cookie_string:
+        kwargs["cookie"] = cookie_string
 
     try:
-        # Khởi tạo handler và lấy thông tin video
         handler = DouyinHandler(kwargs)
         video_info = await handler.fetch_one_video(aweme_id=aweme_id)
         
-        # Trích xuất link tải video không watermark chất lượng cao nhất
-        # Cấu trúc thường là video.play_addr.url_list hoặc video.bit_rate[0].play_addr.url_list
+        # Trích xuất link video
         video_url = None
         if hasattr(video_info, 'video') and video_info.video:
             if hasattr(video_info.video, 'play_addr') and video_info.video.play_addr:
@@ -60,12 +71,9 @@ async def download_douyin_with_f2(aweme_id, tmpdir, cookie_content=None):
         if not video_url:
             raise Exception("Không thể trích xuất link video từ dữ liệu của f2.")
 
-        # Lấy tiêu đề video để đặt tên file
         title = getattr(video_info, 'desc', f"douyin_{aweme_id}")
         title = re.sub(r'[\\/*?:"<>|]', "", title)[:50]
         
-        # Tải file về máy chủ
-        import requests
         file_path = os.path.join(tmpdir, f"{title}.mp4")
         with requests.get(video_url, stream=True) as r:
             r.raise_for_status()
@@ -100,11 +108,12 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                     file_data = None
                     filename = "video.mp4"
                     
-                    # Đọc nội dung cookie nếu có
-                    cookie_content = None
+                    # Đọc và xử lý nội dung cookie nếu có
+                    cookie_string = None
                     if uploaded_cookie is not None:
-                        cookie_content = uploaded_cookie.getvalue().decode("utf-8")
-                        st.info("🍪 Đã nạp nội dung cookies.txt")
+                        raw_cookie_text = uploaded_cookie.getvalue().decode("utf-8")
+                        cookie_string = parse_netscape_cookie(raw_cookie_text)
+                        st.info(f"🍪 Đã nạp và xử lý cookie (độ dài: {len(cookie_string)} ký tự)")
 
                     # NHÁNH 1: DOUYIN/TIKTOK -> DÙNG F2
                     if "douyin.com" in final_url or "tiktok.com" in final_url:
@@ -112,7 +121,7 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                         if not video_id:
                             raise Exception("Không thể trích xuất ID video từ link này.")
                         
-                        filepath, filename = asyncio.run(download_douyin_with_f2(video_id, tmpdir, cookie_content))
+                        filepath, filename = asyncio.run(download_douyin_with_f2(video_id, tmpdir, cookie_string))
                         with open(filepath, "rb") as f: file_data = f.read()
                     
                     # NHÁNH 2: CÁC NỀN TẢNG KHÁC -> DÙNG YT-DLP
@@ -125,10 +134,9 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                         }
                         
                         # Nếu có cookie, lưu ra file tạm để yt-dlp sử dụng
-                        if cookie_content:
+                        if uploaded_cookie is not None:
                             cookie_path = os.path.join(tmpdir, "cookies.txt")
-                            with open(cookie_path, "w", encoding="utf-8") as f:
-                                f.write(cookie_content)
+                            with open(cookie_path, "wb") as f: f.write(uploaded_cookie.getbuffer())
                             ydl_opts['cookiefile'] = cookie_path
 
                         if audio_only:
@@ -151,4 +159,4 @@ if st.button("🚀 Bắt đầu tải", type="primary"):
                         
             except Exception as e:
                 st.error(f"❌ Lỗi: {e}")
-                st.info("Mẹo: Nếu lỗi liên quan đến cookie, hãy chắc chắn file cookies.txt của bạn là mới nhất và được xuất từ trình duyệt đang đăng nhập Douyin.")
+                st.info("Mẹo: Nếu lỗi f2 vẫn tiếp diễn, hãy thử dùng 'Get cookies.txt LOCALLY' để xuất lại cookie mới và đảm bảo bạn đã đăng nhập Douyin.")
