@@ -1,3 +1,4 @@
 yt-dlp>=2024.07.16
 streamlit>=1.35.0
 requests>=2.31.0
+f2
